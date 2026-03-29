@@ -125,13 +125,15 @@ def fit_frame_to_box(frame: List[str], max_w: int, max_h: int, char_aspect: floa
 
     padded = [line.ljust(src_w) for line in frame]
 
-    visual_src_h = src_h * char_aspect
-    scale_w = src_w / max_w if src_w > max_w else 1.0
-    scale_h = visual_src_h / (max_h * char_aspect) if src_h > max_h else 1.0
-    scale = max(scale_w, scale_h, 1.0)
+    scale_h = src_h / max_h if src_h > max_h else 1.0
+    out_h = max(1, min(max_h, int(src_h / scale_h)))
 
-    out_w = max(1, min(max_w, int(src_w / scale)))
-    out_h = max(1, min(max_h, int(src_h / scale)))
+    out_w_from_height = max(1, int(src_w / scale_h))
+
+    if out_w_from_height < max_w:
+        out_w = max_w
+    else:
+        out_w = min(max_w, out_w_from_height)
 
     result = []
     for oy in range(out_h):
