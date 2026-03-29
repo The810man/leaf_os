@@ -436,7 +436,7 @@ class LeafBoardTUI:
 
 
 def main():
-    curses.wrapper(LeafBoardTUI("ascii-frames.json").run)
+    curses.wrapper(LeafBoardTUI("ascii-frames-globe.json").run)
 
 
 if __name__ == "__main__":
