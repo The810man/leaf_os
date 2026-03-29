@@ -9,7 +9,7 @@ from typing import Deque, List, Tuple, Any
 
 
 class SystemMonitor:
-    def __init__(self, history_size: int = 120):
+    def __init__(self, history_size: int = 180):
         self.cpu_history: Deque[float] = deque(maxlen=history_size)
         self.ram_history: Deque[float] = deque(maxlen=history_size)
         self.last_cpu = 0.0
@@ -55,12 +55,10 @@ class AsciiAnimation:
     def _extract_frames(self, data: Any) -> List[Any]:
         if isinstance(data, list):
             return data
-
         if isinstance(data, dict):
             for key in ("frames", "ascii_frames", "images", "animation"):
                 if key in data and isinstance(data[key], list):
                     return data[key]
-
         return []
 
     def _extract_fps(self, data: Any) -> float | None:
@@ -116,46 +114,7 @@ class AsciiAnimation:
         return self.frames[self.frame_index]
 
 
-class GraphRenderer:
-    BARS = "▁▂▃▄▅▆▇█"
-
-    @staticmethod
-    def render_bars(data: Deque[float], width: int) -> str:
-        values = list(data)[-width:]
-        if not values:
-            return " " * width
-
-        out = []
-        for v in values:
-            idx = min(len(GraphRenderer.BARS) - 1, max(0, int((v / 100.0) * (len(GraphRenderer.BARS) - 1))))
-            out.append(GraphRenderer.BARS[idx])
-        return "".join(out)
-
-    @staticmethod
-    def render_area(data: Deque[float], width: int, height: int) -> List[List[Tuple[str, int]]]:
-        values = list(data)[-width:]
-        if not values:
-            return [[(" ", 0) for _ in range(width)] for _ in range(height)]
-
-        canvas = [[(" ", 0) for _ in range(width)] for _ in range(height)]
-
-        for x, v in enumerate(values):
-            filled = int((v / 100.0) * height)
-            for y in range(height):
-                draw_y = height - 1 - y
-                if y < filled:
-                    ratio = y / max(1, height - 1)
-                    if ratio < 0.33:
-                        color = 4
-                    elif ratio < 0.66:
-                        color = 5
-                    else:
-                        color = 6
-                    canvas[draw_y][x] = ("█", color)
-        return canvas
-
-
-def fit_frame_to_box(frame: List[str], max_w: int, max_h: int) -> List[str]:
+def fit_frame_to_box(frame: List[str], max_w: int, max_h: int, char_aspect: float = 2.0) -> List[str]:
     if not frame or max_w <= 0 or max_h <= 0:
         return []
 
@@ -166,23 +125,71 @@ def fit_frame_to_box(frame: List[str], max_w: int, max_h: int) -> List[str]:
 
     padded = [line.ljust(src_w) for line in frame]
 
-    scale_x = max(1.0, src_w / max_w)
-    scale_y = max(1.0, src_h / max_h)
-    scale = max(scale_x, scale_y)
+    visual_src_h = src_h * char_aspect
+    scale_w = src_w / max_w if src_w > max_w else 1.0
+    scale_h = visual_src_h / (max_h * char_aspect) if src_h > max_h else 1.0
+    scale = max(scale_w, scale_h, 1.0)
 
     out_w = max(1, min(max_w, int(src_w / scale)))
     out_h = max(1, min(max_h, int(src_h / scale)))
 
     result = []
     for oy in range(out_h):
-        sy = min(src_h - 1, int(oy * src_h / out_h))
+        sy0 = int(oy * src_h / out_h)
+        sy1 = max(sy0 + 1, int((oy + 1) * src_h / out_h))
         row_chars = []
+
         for ox in range(out_w):
-            sx = min(src_w - 1, int(ox * src_w / out_w))
-            row_chars.append(padded[sy][sx])
+            sx0 = int(ox * src_w / out_w)
+            sx1 = max(sx0 + 1, int((ox + 1) * src_w / out_w))
+
+            best = " "
+            for sy in range(sy0, min(sy1, src_h)):
+                for sx in range(sx0, min(sx1, src_w)):
+                    ch = padded[sy][sx]
+                    if ch != " ":
+                        best = ch
+                        break
+                if best != " ":
+                    break
+
+            row_chars.append(best)
+
         result.append("".join(row_chars).rstrip())
 
     return result
+
+
+class GraphRenderer:
+    BARS = "▁▂▃▄▅▆▇█"
+
+    @staticmethod
+    def sparkline(data: Deque[float], width: int) -> str:
+        values = list(data)[-width:]
+        if not values:
+            return " " * width
+
+        out = []
+        for v in values:
+            idx = round((v / 100.0) * (len(GraphRenderer.BARS) - 1))
+            idx = max(0, min(len(GraphRenderer.BARS) - 1, idx))
+            out.append(GraphRenderer.BARS[idx])
+        return "".join(out)
+
+    @staticmethod
+    def mini_columns(data: Deque[float], width: int, height: int) -> List[str]:
+        values = list(data)[-width:]
+        if not values:
+            return [" " * width for _ in range(height)]
+
+        rows = []
+        for row in range(height):
+            threshold = ((height - row) / height) * 100.0
+            line = []
+            for v in values:
+                line.append("█" if v >= threshold else " ")
+            rows.append("".join(line))
+        return rows
 
 
 class LeafBoardTUI:
@@ -197,17 +204,28 @@ class LeafBoardTUI:
 
     def init_colors(self):
         curses.start_color()
-        curses.use_default_colors()
+        try:
+            curses.use_default_colors()
+        except curses.error:
+            pass
 
-        curses.init_pair(1, 214, -1)
-        curses.init_pair(2, 220, -1)
-        curses.init_pair(3, 252, -1)
-        curses.init_pair(4, 120, -1)
-        curses.init_pair(5, 190, -1)
-        curses.init_pair(6, 208, -1)
-        curses.init_pair(7, 244, -1)
-        curses.init_pair(8, 46, -1)
-        curses.init_pair(9, 196, -1)
+        bg = -1
+        white = curses.COLOR_WHITE
+        yellow = curses.COLOR_YELLOW
+        green = curses.COLOR_GREEN
+        red = curses.COLOR_RED
+        cyan = curses.COLOR_CYAN
+        magenta = curses.COLOR_MAGENTA
+
+        curses.init_pair(1, yellow, bg)   # border
+        curses.init_pair(2, yellow, bg)   # title
+        curses.init_pair(3, white, bg)    # normal text
+        curses.init_pair(4, green, bg)    # low usage
+        curses.init_pair(5, yellow, bg)   # medium usage
+        curses.init_pair(6, red, bg)      # high usage
+        curses.init_pair(7, cyan, bg)     # muted
+        curses.init_pair(8, green, bg)    # animation
+        curses.init_pair(9, magenta, bg)  # alert
 
     def draw_text(self, win, y, x, text, color=3, bold=False):
         try:
@@ -230,70 +248,78 @@ class LeafBoardTUI:
                 win.addstr(y + i, x, "│", curses.color_pair(color))
                 win.addstr(y + i, x + w - 1, "│", curses.color_pair(color))
             win.addstr(y + h - 1, x, "╰" + "─" * (w - 2) + "╯", curses.color_pair(color))
-
             if title and w > len(title) + 4:
-                title_text = f" {title} "
-                tx = x + max(2, (w - len(title_text)) // 2)
-                self.draw_text(win, y, tx, title_text, 2, True)
+                label = f" {title} "
+                tx = x + max(2, (w - len(label)) // 2)
+                self.draw_text(win, y, tx, label, 2, True)
         except curses.error:
             pass
 
-    def draw_animation_panel(self, win, y, x, h, w):
-        self.rounded_box(win, y, x, h, w, " LEAF OS ", 1)
+    def usage_color(self, value: float) -> int:
+        if value >= 80:
+            return 6
+        if value >= 50:
+            return 5
+        return 4
 
-        frame = self.animation.current_frame()
-        if not frame:
-            return
+    def draw_animation_panel(self, win, y, x, h, w):
+        self.rounded_box(win, y, x, h, w, " ANIMATION ", 1)
 
         inner_y = y + 1
         inner_x = x + 2
         inner_h = h - 2
         inner_w = w - 4
 
-        if inner_h < 4 or inner_w < 8:
+        if inner_h < 4 or inner_w < 12:
             self.draw_text(win, y + 1, x + 2, "Panel too small", 9, True)
             return
 
-        fitted = fit_frame_to_box(frame, inner_w, inner_h)
+        fitted = fit_frame_to_box(self.animation.current_frame(), inner_w, inner_h, char_aspect=2.0)
         if not fitted:
             return
 
         frame_h = len(fitted)
         frame_w = max((len(line) for line in fitted), default=0)
-
         start_y = inner_y + max(0, (inner_h - frame_h) // 2)
         start_x = inner_x + max(0, (inner_w - frame_w) // 2)
 
         for i, line in enumerate(fitted):
-            self.draw_text(win, start_y + i, start_x, line, 8)
+            color = 8 if i < frame_h - 2 else 7
+            self.draw_text(win, start_y + i, start_x, line, color)
 
     def draw_stats_panel(self, win, y, x, h, w, cpu, ram):
         self.rounded_box(win, y, x, h, w, " SYSTEM ", 1)
-        self.draw_text(win, y + 2, x + 3, f"CPU  {cpu:5.1f}%", 6 if cpu > 80 else 5 if cpu > 50 else 4, True)
-        self.draw_text(win, y + 3, x + 3, f"RAM  {ram:5.1f}%", 6 if ram > 80 else 5 if ram > 50 else 4, True)
+        self.draw_text(win, y + 2, x + 3, f"CPU  {cpu:5.1f}%", self.usage_color(cpu), True)
+        self.draw_text(win, y + 3, x + 3, f"RAM  {ram:5.1f}%", self.usage_color(ram), True)
         self.draw_text(win, y + 2, x + w - 18, time.strftime("%H:%M:%S"), 7)
         self.draw_text(win, y + 3, x + w - 18, "LIVE", 8, True)
 
-    def draw_graph_panel(self, win, y, x, h, w, title, data):
+    def draw_graph_panel(self, win, y, x, h, w, title, data, current_value):
         self.rounded_box(win, y, x, h, w, title, 1)
 
+        inner_y = y + 1
+        inner_x = x + 2
         inner_h = h - 3
         inner_w = w - 4
-        if inner_h < 2 or inner_w < 4:
+
+        if inner_h < 4 or inner_w < 12:
             return
 
-        canvas = GraphRenderer.render_area(data, inner_w, inner_h)
+        plot_h = max(1, inner_h - 2)
+        columns = GraphRenderer.mini_columns(data, inner_w, plot_h)
 
-        for row_i, row in enumerate(canvas):
-            for col_i, (ch, color) in enumerate(row):
-                if ch != " ":
-                    try:
-                        win.addstr(y + 1 + row_i, x + 2 + col_i, ch, curses.color_pair(color))
-                    except curses.error:
-                        pass
+        color = self.usage_color(current_value)
+        for i, row in enumerate(columns):
+            self.draw_text(win, inner_y + i, inner_x, row, color)
 
-        bars = GraphRenderer.render_bars(data, inner_w)
-        self.draw_text(win, y + h - 2, x + 2, bars[:inner_w], 2)
+        baseline = "─" * inner_w
+        self.draw_text(win, inner_y + plot_h, inner_x, baseline, 7)
+
+        spark = GraphRenderer.sparkline(data, max(10, inner_w - 10))
+        label = f"{current_value:5.1f}% "
+        spark_space = max(0, inner_w - len(label))
+        self.draw_text(win, y + h - 2, x + 2, spark[:spark_space], 2)
+        self.draw_text(win, y + h - 2, x + 2 + inner_w - len(label), label, color, True)
 
     def draw_log_panel(self, win, y, x, h, w):
         self.rounded_box(win, y, x, h, w, " COMMAND ", 1)
@@ -343,7 +369,6 @@ class LeafBoardTUI:
         self.draw_text(stdscr, 2, 3, "Terminal too small", 9, True)
         self.draw_text(stdscr, 4, 3, f"Current size: {w}x{h}", 3)
         self.draw_text(stdscr, 5, 3, "Need at least about 100x28", 3)
-        self.draw_text(stdscr, 7, 3, "The leaf will auto-fit when enough space exists.", 2, True)
         stdscr.refresh()
 
     def draw(self, stdscr):
@@ -365,14 +390,14 @@ class LeafBoardTUI:
 
         self.rounded_box(stdscr, 0, 0, h, w, " LEAF BOARD ", 1)
 
-        left_w = max(44, min(72, int(w * 0.38)))
+        left_w = max(44, min(78, int(w * 0.40)))
         right_x = left_w + 1
         right_w = w - right_x - 1
 
         self.draw_animation_panel(stdscr, 1, 1, h - 9, left_w)
         self.draw_stats_panel(stdscr, 1, right_x, 6, right_w, cpu, ram)
-        self.draw_graph_panel(stdscr, 7, right_x, 9, right_w, " CPU HISTORY ", self.monitor.cpu_history)
-        self.draw_graph_panel(stdscr, 16, right_x, 9, right_w, " RAM HISTORY ", self.monitor.ram_history)
+        self.draw_graph_panel(stdscr, 7, right_x, 9, right_w, " CPU HISTORY ", self.monitor.cpu_history, cpu)
+        self.draw_graph_panel(stdscr, 16, right_x, 9, right_w, " RAM HISTORY ", self.monitor.ram_history, ram)
         self.draw_log_panel(stdscr, h - 8, 1, 7, w - 2)
 
         footer = "Enter submit  •  Backspace delete  •  q quit  •  reload animation"
