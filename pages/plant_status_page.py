@@ -1,250 +1,114 @@
-import curses
-import time
-from typing import List, Dict, Any, Optional
+"""Single-plant status page.
+
+Replaces the old 6-pot grid. Shows the plant currently published on
+`plants/<id>/state` (mocked locally for now) inside a clean container
+with sensor + flag panels.
+"""
+
+from typing import List
 
 from models.system_monitor import SystemMonitor
 from models.ascii_animation import AsciiAnimation
+from models.plant import MQTTPlantMock, STAGE_NAMES
 from models.plant_stage import PlantStageLoader
 from pages.base_page import BasePage
 from ui.panels import draw_text, rounded_box
-from renderers.frame_utils import fit_frame_to_box
-
-
-class Plant:
-    """Represents a plant with its status."""
-
-    def __init__(self, plant_id: int, name: str, strain: str, stage: int, 
-                 needs_water: bool, can_harvest: bool, days_in_stage: int):
-        self.plant_id = plant_id
-        self.name = name
-        self.strain = strain
-        self.stage = stage  # 0-9
-        self.needs_water = needs_water
-        self.can_harvest = can_harvest
-        self.days_in_stage = days_in_stage
-
-    def get_status_color(self) -> int:
-        """Get color based on plant status."""
-        if self.can_harvest:
-            return 8  # Green - ready to harvest
-        elif self.needs_water:
-            return 6  # Red - needs water
-        elif self.stage == 0:
-            return 7  # Cyan - empty
-        else:
-            return 4  # Green - healthy
 
 
 class PlantStatusPage(BasePage):
-    """Plant status page showing multiple plants."""
+    """Overview of the single tracked plant."""
 
-    def __init__(self):
+    def __init__(self, plant_source: MQTTPlantMock):
         super().__init__("plants")
+        self.source = plant_source
         self.stage_loader = PlantStageLoader()
-        # Mock data: 6 plants - 2 active, 4 empty
-        self.plants: List[Plant] = [
-            Plant(1, "Plant Alpha", "Northern Lights", 3, False, False, 5),
-            Plant(2, "Plant Beta", "White Widow", 1, False, False, 2),
-            Plant(3, "Plant Gamma", "Empty", 0, False, False, 0),
-            Plant(4, "Plant Delta", "Empty", 0, False, False, 0),
-            Plant(5, "Plant Epsilon", "Empty", 0, False, False, 0),
-            Plant(6, "Plant Zeta", "Empty", 0, False, False, 0),
-        ]
-        self.current_plant_index = 0
-        self.last_update = 0.0
-        self.update_interval = 5.0
-        self.creation_mode = False
-        self.creation_step = 0
-        self.creation_data: Dict[str, str] = {}
 
     def get_title(self) -> str:
         return " PLANT STATUS "
 
-    def _update_mock_data(self):
-        """Update mock plant data periodically."""
-        now = time.monotonic()
-        if now - self.last_update >= self.update_interval:
-            # Simulate plant growth and status changes
-            for plant in self.plants:
-                if plant.stage > 0:
-                    plant.days_in_stage += 1
-                    # Random chance to need water
-                    if plant.days_in_stage % 3 == 0:
-                        plant.needs_water = not plant.needs_water
-            self.last_update = now
-
     def draw(self, stdscr, y: int, x: int, h: int, w: int,
              monitor: SystemMonitor, animation: AsciiAnimation):
-        """Draw the plant status page with multiple pots."""
-        self._update_mock_data()
+        self.source.tick()
+        plant = self.source.plant
 
-        # Draw page header
-        draw_text(stdscr, y, x + 2, "╔══════════════════════════════════════════════════════════════╗", 1)
-        draw_text(stdscr, y + 1, x + 2, "║                    CULTIVATION MONITOR                      ║", 2, True)
-        draw_text(stdscr, y + 2, x + 2, "╚══════════════════════════════════════════════════════════════╝", 1)
+        # Outer container — modeled as the MQTT topic envelope.
+        topic = f" plants/{plant.plant_id}/state "
+        rounded_box(stdscr, y, x, h, w, topic, 1)
 
-        # Draw navigation header
-        nav_y = y + 4
-        draw_text(stdscr, nav_y, x + 2, f"Showing {len(self.plants)} plants │ Press 1-6 to select │ 'c' to create new plant", 7)
+        # Header line
+        header = f"{plant.name}  ·  {plant.strain}  ·  {plant.stage_name}"
+        draw_text(stdscr, y + 1, x + 3, header, 2, True)
+        sub = f"Age: {plant.age_days}d ({plant.age_weeks:.1f}w)   Stage {plant.stage}/9   Harvest in ~{plant.days_until_harvest}d"
+        draw_text(stdscr, y + 2, x + 3, sub, 7)
 
-        # Draw plants in a grid (3 columns)
-        plant_start_x = x + 2
-        plant_start_y = nav_y + 2
-        plant_width = 25
-        plant_height = 20
-        cols = 3
+        # Split into left (art) / right (info) columns
+        inner_y = y + 4
+        inner_h = h - 5
+        left_w = max(28, w // 2 - 2)
+        right_x = x + left_w + 2
+        right_w = w - left_w - 4
 
-        for i, plant in enumerate(self.plants):
-            col = i % cols
-            row = i // cols
-            px = plant_start_x + col * (plant_width + 2)
-            py = plant_start_y + row * (plant_height + 2)
+        self._draw_art(stdscr, inner_y, x + 2, inner_h, left_w, plant.stage)
+        self._draw_sensors(stdscr, inner_y, right_x, plant)
+        self._draw_flags(stdscr, inner_y + 9, right_x, right_w, plant)
+        self._draw_recent_events(stdscr, inner_y + 16, right_x, right_w, max(3, inner_h - 17), plant)
 
-            if py + plant_height >= h - 2:
-                break
+    def _draw_art(self, stdscr, y, x, h, w, stage: int):
+        rounded_box(stdscr, y, x, h, w, f" stage_{stage} ", 1)
+        art = self.stage_loader.get_stage(stage)
+        if not art:
+            return
+        art_h = len(art)
+        art_w = max((len(line) for line in art), default=0)
+        start_y = y + max(1, (h - art_h) // 2)
+        start_x = x + max(2, (w - art_w) // 2)
+        for i, line in enumerate(art):
+            if start_y + i < y + h - 1:
+                draw_text(stdscr, start_y + i, start_x, line, 8, True)
+        # Stage name caption
+        caption = STAGE_NAMES.get(stage, "")
+        if caption and h > 4:
+            cx = x + max(2, (w - len(caption)) // 2)
+            draw_text(stdscr, y + h - 2, cx, caption, 4, True)
 
-            # Draw plant box
-            color = plant.get_status_color()
-            stage_name = self.stage_loader.get_stage_names().get(plant.stage, "Unknown")
-            
-            # Box title with strain name
-            if plant.stage == 0:
-                box_title = f" {plant.name} - EMPTY "
-            else:
-                box_title = f" {plant.name} - {plant.strain} "
-            
-            rounded_box(stdscr, py, px, plant_height, plant_width, box_title, color)
+    def _draw_sensors(self, stdscr, y, x, plant):
+        rounded_box(stdscr, y, x, 8, 38, " plants/<id>/sensors ", 1)
+        s = plant.sensors
+        rows = [
+            ("Temperature", f"{s.temp_c:5.1f} °C", 4),
+            ("Humidity",    f"{s.humidity:5.1f} %", 4),
+            ("Soil",        f"{s.soil_moisture:5.1f} %", 6 if s.soil_moisture < 35 else 4),
+            ("Light",       f"{s.light_lux:>5} lux", 5),
+        ]
+        for i, (label, val, color) in enumerate(rows):
+            draw_text(stdscr, y + 2 + i, x + 3, f"{label:<13}", 7)
+            draw_text(stdscr, y + 2 + i, x + 18, val, color, True)
 
-            # Draw plant ASCII art
-            stage_art = self.stage_loader.get_stage(plant.stage)
-            if stage_art:
-                # Calculate inner dimensions for the art
-                inner_w = plant_width - 4
-                inner_h = plant_height - 8  # Leave space for info text
-                
-                # Fit the art to the container
-                fitted_art = fit_frame_to_box(stage_art, inner_w, inner_h, char_aspect=1.0)
-                
-                # Draw the fitted art
-                art_y = py + 1
-                for line in fitted_art:
-                    if art_y < py + plant_height - 7:
-                        draw_text(stdscr, art_y, px + 2, line, color)
-                        art_y += 1
+    def _draw_flags(self, stdscr, y, x, w, plant):
+        rounded_box(stdscr, y, x, 6, 38, " flags ", 1)
+        water_color = 6 if plant.needs_water else 4
+        water_txt = "NEEDS WATER" if plant.needs_water else "OK"
+        harvest_color = 8 if plant.can_harvest else 7
+        harvest_txt = "READY" if plant.can_harvest else "not yet"
+        draw_text(stdscr, y + 2, x + 3, "Water    :", 7)
+        draw_text(stdscr, y + 2, x + 16, water_txt, water_color, True)
+        draw_text(stdscr, y + 3, x + 3, "Harvest  :", 7)
+        draw_text(stdscr, y + 3, x + 16, harvest_txt, harvest_color, True)
 
-            # Draw plant info below the art
-            info_y = py + plant_height - 7
-            if info_y < py + plant_height - 1:
-                draw_text(stdscr, info_y, px + 2, f"Stage: {stage_name}", 3, True)
-                info_y += 1
-            if info_y < py + plant_height - 1:
-                draw_text(stdscr, info_y, px + 2, f"Days: {plant.days_in_stage}", 3)
-                info_y += 1
-            if info_y < py + plant_height - 1:
-                water_status = "YES" if plant.needs_water else "NO"
-                water_color = 6 if plant.needs_water else 4
-                draw_text(stdscr, info_y, px + 2, f"Water: {water_status}", water_color)
-                info_y += 1
-            if info_y < py + plant_height - 1:
-                harvest_status = "YES" if plant.can_harvest else "NO"
-                harvest_color = 8 if plant.can_harvest else 7
-                draw_text(stdscr, info_y, px + 2, f"Harvest: {harvest_status}", harvest_color)
-
-        # Draw legend at the bottom
-        legend_y = h - 6
-        if legend_y > plant_start_y + 10:
-            rounded_box(stdscr, legend_y, x + 2, 5, w - 4, " LEGEND ", 1)
-            draw_text(stdscr, legend_y + 2, x + 5, "Stages: 0=Empty │ 1=Seedling │ 2=Sprout │ 3=Young │ 4=Growing │ 5=Medium │ 6=Large │ 7=Mature │ 8=Flowering │ 9=Harvest", 3)
-            draw_text(stdscr, legend_y + 3, x + 5, "Commands: water <id> │ harvest <id> │ create │ remove <id> │ 1-6 (select plant)", 7)
+    def _draw_recent_events(self, stdscr, y, x, w, h, plant):
+        if h < 4:
+            return
+        rounded_box(stdscr, y, x, h, min(w, 60), " plants/<id>/events ", 1)
+        events = plant.events[-(h - 3):]
+        for i, ev in enumerate(events):
+            ts = ev.ts.strftime("%m-%d %H:%M")
+            line = f"{ts}  {ev.kind:<11} {ev.note}"
+            draw_text(stdscr, y + 1 + i, x + 3, line[: w - 4], 3)
 
     def handle_input(self, key: int, output_lines: List[str]) -> bool:
-        """Handle input for plant navigation and creation."""
-        if self.creation_mode:
-            return self._handle_creation_input(key, output_lines)
-        
-        # Plant navigation with number keys
-        if key in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6")):
-            plant_num = int(chr(key))
-            if 1 <= plant_num <= len(self.plants):
-                self.current_plant_index = plant_num - 1
-                output_lines.append(f"Selected plant {plant_num}: {self.plants[self.current_plant_index].name}")
-                return True
-        
-        # Create new plant
-        if key == ord("c"):
-            self.creation_mode = True
-            self.creation_step = 0
-            self.creation_data = {}
-            output_lines.append("Entering plant creation mode...")
+        # 'w' to water the current plant
+        if key == ord("w"):
+            self.source.water()
+            output_lines.append(f"Watered {self.source.plant.name}.")
             return True
-        
-        return False
-
-    def _handle_creation_input(self, key: int, output_lines: List[str]) -> bool:
-        """Handle input during plant creation."""
-        if key == 27:  # ESC
-            self.creation_mode = False
-            output_lines.append("Plant creation cancelled.")
-            return True
-        
-        if key in (10, 13, curses.KEY_ENTER):  # ENTER
-            steps = ["name", "strain"]
-            if self.creation_step < len(steps):
-                current_key = steps[self.creation_step]
-                if current_key in self.creation_data and self.creation_data[current_key]:
-                    self.creation_step += 1
-                    if self.creation_step >= len(steps):
-                        # Find first empty pot
-                        empty_pot_index = None
-                        for i, plant in enumerate(self.plants):
-                            if plant.stage == 0:
-                                empty_pot_index = i
-                                break
-                        
-                        if empty_pot_index is not None:
-                            # Update the empty pot
-                            self.plants[empty_pot_index].name = self.creation_data.get("name", f"Plant {empty_pot_index + 1}")
-                            self.plants[empty_pot_index].strain = self.creation_data.get("strain", "Unknown")
-                            self.plants[empty_pot_index].stage = 1  # Start as seedling
-                            output_lines.append(f"Created new plant: {self.plants[empty_pot_index].name} ({self.plants[empty_pot_index].strain})")
-                        else:
-                            # Add new plant
-                            new_id = len(self.plants) + 1
-                            new_plant = Plant(
-                                new_id,
-                                self.creation_data.get("name", f"Plant {new_id}"),
-                                self.creation_data.get("strain", "Unknown"),
-                                1,  # Start as seedling
-                                False,
-                                False,
-                                0
-                            )
-                            self.plants.append(new_plant)
-                            output_lines.append(f"Created new plant: {new_plant.name} ({new_plant.strain})")
-                else:
-                    output_lines.append("Please enter a value before pressing ENTER.")
-            else:
-                self.creation_mode = False
-                output_lines.append("Plant creation complete!")
-            return True
-        
-        # Backspace
-        if key in (curses.KEY_BACKSPACE, 127, 8):
-            steps = ["name", "strain"]
-            if self.creation_step < len(steps):
-                current_key = steps[self.creation_step]
-                if current_key in self.creation_data:
-                    self.creation_data[current_key] = self.creation_data[current_key][:-1]
-            return True
-        
-        # Regular character input
-        if 32 <= key <= 126:
-            steps = ["name", "strain"]
-            if self.creation_step < len(steps):
-                current_key = steps[self.creation_step]
-                if current_key not in self.creation_data:
-                    self.creation_data[current_key] = ""
-                self.creation_data[current_key] += chr(key)
-            return True
-        
         return False

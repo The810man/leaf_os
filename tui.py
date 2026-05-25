@@ -4,10 +4,13 @@ from typing import List
 
 from models.system_monitor import SystemMonitor
 from models.ascii_animation import AsciiAnimation
+from models.plant import MQTTPlantMock
 from pages.base_page import BasePage
 from pages.info_page import InfoPage
 from pages.mqtt_page import MQTTPage
 from pages.plant_status_page import PlantStatusPage
+from pages.plant_stats_page import PlantStatsPage
+from pages.plant_life_page import PlantLifeViewPage
 from ui.colors import init_colors
 from ui.panels import draw_text, rounded_box, draw_too_small
 from ui.commands import process_command
@@ -23,11 +26,16 @@ class LeafBoardTUI:
         self.last_stats_update = 0.0
         self.stats_interval = 0.20
         
+        # Shared plant data source — stand-in for an MQTT subscriber.
+        self.plant_source = MQTTPlantMock()
+
         # Initialize pages
         self.pages: List[BasePage] = [
             InfoPage(),
             MQTTPage(),
-            PlantStatusPage(),
+            PlantStatusPage(self.plant_source),
+            PlantStatsPage(self.plant_source),
+            PlantLifeViewPage(self.plant_source),
         ]
         self.current_page_index = 0
 

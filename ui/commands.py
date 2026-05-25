@@ -29,11 +29,7 @@ def process_command(cmd: str, output_lines: List[str], monitor: SystemMonitor,
             "  quit          - exit app",
             "",
             "Plant Commands (on Plant Status page):",
-            "  1-3           - switch between plants",
-            "  c             - create new plant",
-            "  water         - water current plant",
-            "  harvest       - harvest current plant",
-            "  remove        - remove current plant",
+            "  w             - water current plant",
         ])
     elif cmd == "clear":
         output_lines.clear()
